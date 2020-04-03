@@ -1,0 +1,476 @@
+---
+title: "Exploracão dos dados do Twitter (17/03/2020 a 26/03/2020)"
+author: "Tarssio"
+date: "3/26/2020"
+output: 
+  html_document:
+    number_sections: TRUE
+    code_folding: "hide"
+    theme: united
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require(rjson)
+require(tidyverse)
+require(lubridate)
+require(tm)
+require(nls2)
+require(boot)
+require(gmodels)
+library(igraph)
+library(ggraph)
+library(quanteda)
+library(stringi)
+require(tidygraph)
+
+
+# Controle gráfico 
+
+opt <- theme_bw()+
+  theme(axis.title = element_text(face = "bold", color = "black", size = 20),
+        axis.text.x = element_text(face = "plain", color = "black", 
+                                   size = 18, angle = 90),
+        axis.text.y = element_text(face = "plain", color = "black", size = 18),
+        legend.text=element_text(size=20, face = "bold"),
+        legend.title = element_text(size = 20, face = "bold"),
+        strip.text.x = element_text(size = 18, face = "bold"),
+        strip.text.y = element_text(size = 14, face = "bold"))
+# loading
+
+folder <- c("data/")
+
+k <- list.files("data/")
+
+# Read: 
+
+df_create <- function(x){
+  
+  aux <- readRDS(file = paste0(folder,k[x])) %>% 
+    select(screen_name, text, created_at, favorite_count, retweet_count, 
+           reply_to_screen_name, quote_count, reply_count, is_retweet)
+  
+}
+
+
+df <- 1:length(k) %>% 
+  map_dfr(df_create)
+
+# Ajustes: 
+
+tbl <- df %>% 
+  mutate(difusao = retweet_count, 
+         aprovacao = favorite_count, 
+         impressao = difusao + aprovacao) %>% 
+  select(screen_name, text, created_at, difusao, aprovacao, impressao, 
+         is_retweet)
+
+tbl_ajuste <- tbl %>% 
+  mutate(time = lubridate::ymd_hms(created_at, tz = "America/Bahia")) %>% 
+  mutate(time = lubridate::round_date(created_at, unit = "hour")) %>% 
+  select(-created_at)
+
+
+```
+
+# Contexto
+
+São analisados, a seguir, cerca de 650 mil tuítes referentes as seguintes palavras chaves: "corona", "coronavirus", "covid19", "covid", "cloroquina" e "quarentena". 
+
+Neste breve documento, busca-se analisar a distribuição acumulada do instante da primeira publicação dos usuários dadas as palavras chaves supracitadas. Metodologia encontrada no artigo: "The COVID-19 Social Media Infodemic" (Cinelli et al., 2020).
+
+# Distribuiçoes e determinação da taxa de crescimento da "infodemia": 
+
+## Distribuição para todos as publicações obtidas pela API: 
+
+```{r}
+
+tbl_acc <- tbl_ajuste %>% 
+  distinct(screen_name, .keep_all = TRUE) %>% 
+  group_by(time) %>% 
+  summarise(n = n()) %>% 
+  mutate(n = cumsum(n)) %>% 
+  mutate(t = as.numeric((time - min(time))/3600)+ 1)
+
+
+tbl_acc %>% 
+  ggplot(aes(x = t, y = n)) +
+  geom_line() + 
+  labs(x = "Tempo em horas a partir do dia 17/03/2020", 
+       y = "Quantidade de novos perfis") +
+  theme_minimal()
+
+```
+
+Um parâmetro importante ao se analisar a "infodemia" diz respeito ao $R_o$ que se refere a possibilidade de observação deste fenomeno. 
+
+Obs: Podemos comparar estas taxas com a da propagação dos casos registrados no país.
+
+A fim de obter o parâmetro $R_o$ será utilizada a seguinte equação: 
+
+$$ I = [\frac{R_o}{(1+d)^t}]^t $$
+
+Onde: I: representa a distribuição acumulada de usuários publicando pela primeira vez até determinado horário; t: representa o tempo;  d é um termo que leva em conta o amortecimento da transmissão da informação ao longo do tempo.
+
+```{r}
+
+exp_ <- function(t, R, d){
+
+  (R/((1+d)^t))^t
+} 
+
+
+aux <- nls2(n ~ exp_(t, R, d), data = tbl_acc, start = list(R = 1000, d = 0.05), 
+            trace = F, 
+            control = nls.control(maxiter = 1000, minFactor=2^-12))
+
+Ro <- summary(aux)[["coefficients"]][1,1]
+
+d <- summary(aux)[["coefficients"]][1,2]
+
+
+
+p1 <- tbl_acc %>% 
+  mutate(stat = predict(aux,tbl_acc)) %>% 
+  ggplot() +
+  geom_line(aes(x = t, y = n, col = "black")) +
+  geom_line(aes(x = t, y = stat, col = "red")) +
+  ggplot2::annotate("text",  label = paste0("Ro =", "", round(Ro,3)), 
+           x = 60, y = 0.7*max(tbl_acc$n)) +
+  scale_color_manual(values = c("black", "red"), 
+                     labels = c("Observado", "Modelado")) +
+  labs(col = "", title = "Ajuste exponencial para todas publicações coletadas") +
+  theme_bw()
+
+p1
+
+```
+
+
+## Distribuição para publicacões únicas, excluindo retweets, obtidas pela API: 
+
+
+```{r}
+
+tbl_acc <- tbl_ajuste %>% 
+  filter(is_retweet == FALSE) %>% 
+  distinct(screen_name, .keep_all = TRUE) %>% 
+  group_by(time) %>% 
+  summarise(n = n()) %>% 
+  mutate(n = cumsum(n)) %>% 
+  mutate(t = as.numeric((time - min(time))/3600)+ 1)
+
+
+tbl_acc %>% 
+  ggplot(aes(x = t, y = n)) +
+  geom_line() + 
+  labs(x = "Tempo em horas a partir do dia 17/03/2020", 
+       y = "Quantidade de novos perfis") +
+  theme_minimal()
+
+```
+
+Os números totais para publicações, excluindo os retweets, são significativamente menores. Porém, observa-se o mesmo comportamento que ao se contemplar todas informações, porém com uma taxa inferior.
+
+```{r}
+
+aux <- nls2(n ~ exp_(t, R, d), data = tbl_acc, start = list(R = 100, d = 0.05), 
+            trace = F, 
+            control = nls.control(maxiter = 1000, minFactor=2^-12))
+
+Ro <- summary(aux)[["coefficients"]][1,1]
+
+d <- summary(aux)[["coefficients"]][1,2]
+
+
+
+p2 <- tbl_acc %>% 
+  mutate(stat = predict(aux,tbl_acc)) %>% 
+  ggplot() +
+  geom_line(aes(x = t, y = n, col = "black")) +
+  geom_line(aes(x = t, y = stat, col = "red")) +
+  ggplot2::annotate("text",  label = paste0("Ro =", "", round(Ro,3)), 
+           x = 60, y = 0.7*max(tbl_acc$n)) +
+  scale_color_manual(values = c("black", "red"), 
+                     labels = c("Observado", "Modelado")) +
+  labs(col = "", title = "Ajuste exponencial excluindo republicações") +
+  theme_bw()
+
+p2
+
+```
+
+## Comparando as duas abordagens
+
+
+```{r}
+
+gridExtra::grid.arrange(p1, p2)
+
+```
+
+Percebe-se que ambos apontam para uma região bem próxima de Ro, que representa a taxa de crescimento, se diferenciando pelo retardamento do crescimento desta informação. Interessante observar, também, que a proximidade entre a taxa de crescimento encontrada tanto para a totalidade das publicações como para aquelas que não são republicações validam uma metodologia pautada apenas na última.
+
+Sendo $R_o$ maior que 1, observa-se que o aparecimento de novos usuários publicando sobre o tema em destaque ainda é crescente. Uma sugestão é esperar mais uma semana e ver qual o comportamento nesta semana. 
+
+Além disto, estes valores podem estar contaminados por perfis falsos, desinformações e fake news. Por isto, também, é necessário que planejemos uma estratégia para classificar em informação e desinformações e entender a taxa de crescimento de ambas.
+
+# Testando algumas redes: 
+
+
+## Ajustes Iniciais (ver code): 
+
+```{r}
+
+# Filtrando apenas não replicações
+
+word_ajuste <- tbl_ajuste %>% 
+  filter(is_retweet == FALSE) 
+
+text <- word_ajuste$text %>% 
+  tolower() %>% 
+  as.tibble() %>% 
+  mutate(value = stri_trans_general(value, "Latin-ASCII"))
+
+# Removendo palavras de não interesse
+
+nowords <- c("sei", "to", "sobre", "ja", "ta", "vai", "nao", "📈", "🤦♀", 
+            "tendo", "poucos", "obg", "desses", "tudo", 'vdd', "
+             mil", "so", "pra", "tudo", "n", "q", "vou", "ter", "pq", "tds", 
+             "+", "la", "fez", "vcs", "pro", "etc", "nada", "oq", 
+             "voce", "ver", "vc", 'ficar', "toda")
+
+# Centro das redes: 
+
+  word <- c("@minsaude", "@who", "@UN", "@ABRASCO", 
+          "@lhmandetta", "@anvisa_oficial")
+
+
+# Função de ajuste dos usuários ligados aos usuários acima: 
+
+  # toks_news <- tokens(text$value, remove_punct = TRUE)
+  # 
+  # toks_news <- tokens_select(toks_news, pattern = stopwords('pt'), 
+  #                            selection = 'remove')
+  # 
+  # toks_news <- tokens_select(toks_news, pattern = nowords, 
+  #                            selection = 'remove')
+  
+  load(file = "token.RData")
+  
+  f_chi2 <- function(x) {
+  
+  toks_keep <- tokens_keep(toks_news, pattern = word[x], window = 50) 
+  
+  toks_nokeep <- tokens_remove(toks_news, pattern = word[x], window = 50)
+  
+  # dfm
+  
+  dfmat_keep <- dfm(toks_keep)
+  
+  dfmat_nokeep <- dfm(toks_nokeep)
+  
+  # t-test
+  
+  tstat_key_keep <- textstat_keyness(rbind(dfmat_keep, dfmat_nokeep), 
+                                     seq_len(ndoc(dfmat_keep)))
+  
+  tstat_key_keep_subset <- tstat_key_keep[tstat_key_keep$n_target > 1, ]
+  
+  aux <- tstat_key_keep_subset %>% 
+    filter(str_detect(feature, "@")) %>% 
+    head(15) %>% 
+    mutate(id = word[x])
+
+  
+}
+
+```
+
+
+
+## Grafo: 
+
+
+```{r}
+
+data_graph <- 1:length(word) %>% 
+  map(f_chi2)
+
+
+df <- data_graph %>% {
+  tibble(
+    feature = unlist(map(., "feature")),
+    id = unlist(map(., "id")), 
+    chi2 = unlist(map(., "chi2")), 
+    n_ref = unlist(map(., "n_target"))
+  )}
+
+
+# mutate edges and nodes
+
+grafico_pal <- df %>%
+  mutate(type = id) %>% 
+  as_tbl_graph() %>%
+  ggraph("kk") +
+  geom_edge_link(aes(col = type), show.legend = FALSE) +
+  geom_node_point(color = "black", fill = "white", size = 4) +
+  geom_node_text(aes(label = name), repel = TRUE,
+                 size= 4, color="black") +
+  theme_void()
+
+grafico_pal
+```
+
+Agora é preciso entender o padrão destes twitters. Vou gerar um txt com os perfís, é importante (se quisermos estudar estas interações) que tracemos uma estratégia para entender o que este cenário da rede significa, uma vez que há muitos anônimos entre os perfis.
+
+Algumas outras observações:
+
+1 - Fifa e who:  https://nacoesunidas.org/fifa-e-oms-se-unem-para-combater-o-coronavirus/
+
+2 - Antonio Guterres: https://valor.globo.com/mundo/noticia/2020/03/26/nao-estamos-ganhando-a-guerra-contra-o-virus-diz-secretario-da-onu.ghtml
+
+3 - Dr Tedros: https://www.who.int/antimicrobial-resistance/interagency-coordination-group/dg_who_bio/en/
+
+Mas ao chegar no Brasil, tem todo tipo de perfil.
+
+
+# Primeiro Ajuste: 
+
+## Passando para escala diária: 
+
+### Contando todas publicaçoes captadas pela API: 
+
+```{r}
+
+tbl_ajuste <- tbl %>% 
+  mutate(time = lubridate::ymd_hms(created_at, tz = "America/Bahia")) %>% 
+  mutate(time = lubridate::round_date(created_at, unit = "day")) %>% 
+  select(-created_at)
+
+
+tbl_acc <- tbl_ajuste %>% 
+  distinct(screen_name, .keep_all = TRUE) %>% 
+  group_by(time) %>% 
+  summarise(n = n()) %>% 
+  mutate(n = cumsum(n)) %>% 
+  mutate(t = as.numeric((time - min(time))/(3600*24))+ 1)
+
+
+tbl_acc %>% 
+  ggplot(aes(x = t, y = n)) +
+  geom_line() + 
+  labs(x = "Tempo em dias a partir do dia 17/03/2020", 
+       y = "Quantidade de novos perfis") +
+  theme_minimal()
+
+```
+
+
+#### Determinando Ro
+
+```{r}
+
+exp_ <- function(t, R, d){
+
+  (R/((1+d)^t))^t
+} 
+
+
+aux <- nls2(n ~ exp_(t, R, d), data = tbl_acc, start = list(R = 1000, d = 0.05), 
+            trace = F, 
+            control = nls.control(maxiter = 5000, minFactor=2^-12))
+
+Ro <- summary(aux)[["coefficients"]][1,1]
+
+d <- summary(aux)[["coefficients"]][1,2]
+
+
+
+p4 <- tbl_acc %>% 
+  mutate(stat = predict(aux,tbl_acc)) %>% 
+  ggplot() +
+  geom_line(aes(x = t, y = n, col = "black")) +
+  geom_line(aes(x = t, y = stat, col = "red")) +
+  ggplot2::annotate("text",  label = paste0("Ro =", "", round(Ro,3)), 
+           x = 3, y = 0.7*max(tbl_acc$n)) +
+  scale_color_manual(values = c("black", "red"), 
+                     labels = c("Observado", "Modelado")) +
+  labs(col = "", title = "Ajuste exponencial para todas publicações coletadas") +
+  theme_bw()
+
+p4
+
+
+```
+
+### Para publicações únicas:
+
+```{r}
+
+tbl_ajuste <- tbl %>% 
+  mutate(time = lubridate::ymd_hms(created_at, tz = "America/Bahia")) %>% 
+  mutate(time = lubridate::round_date(created_at, unit = "day")) %>% 
+  select(-created_at)
+
+tbl_acc <- tbl_ajuste %>% 
+  filter(is_retweet == FALSE) %>% 
+  distinct(screen_name, .keep_all = TRUE) %>% 
+  group_by(time) %>% 
+  summarise(n = n()) %>% 
+  mutate(n = cumsum(n)) %>% 
+  mutate(t = as.numeric((time - min(time))/(3600*24))+ 1)
+
+
+tbl_acc %>% 
+  ggplot(aes(x = t, y = n)) +
+  geom_line() + 
+  labs(x = "Tempo em horas a partir do dia 17/03/2020", 
+       y = "Quantidade de novos perfis") +
+  theme_minimal()
+
+
+```
+
+#### Determinado o Ro
+
+```{r}
+exp_ <- function(t, R, d){
+
+  (R/((1+d)^t))^t
+} 
+
+
+aux <- nls2(n ~ exp_(t, R, d), data = tbl_acc, start = list(R = 1000, d = 0.05), 
+            trace = F, 
+            control = nls.control(maxiter = 5000, minFactor=2^-12))
+
+Ro <- summary(aux)[["coefficients"]][1,1]
+
+d <- summary(aux)[["coefficients"]][1,2]
+
+
+
+p5 <- tbl_acc %>% 
+  mutate(stat = predict(aux,tbl_acc)) %>% 
+  ggplot() +
+  geom_line(aes(x = t, y = n, col = "black")) +
+  geom_line(aes(x = t, y = stat, col = "red")) +
+  ggplot2::annotate("text",  label = paste0("Ro =", "", round(Ro,3)), 
+           x = 3, y = 0.7*max(tbl_acc$n)) +
+  scale_color_manual(values = c("black", "red"), 
+                     labels = c("Observado", "Modelado")) +
+  labs(col = "", title = "Ajuste exponencial para todas publicações coletadas") +
+  theme_bw()
+
+p5
+```
+
+Os valores de Ro se tornam bastante diferentes quando utilizamos esta escala, atigindo valores de alta magnitude como 50 e 14 para, respectivamente, todas publicações captadas pela API e apenas publicações unicas.
+
+É interessante que, apesar de solicitar 1 milhão de publicações, divididas em 5 palavras chaves, recebemos 650 mil, porém as publicações estão entre os dias 22 e 26.
+
+
+
