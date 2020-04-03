@@ -1,0 +1,10 @@
+name: Publish Document
+title:
+username:
+account: rpubs
+server: rpubs.com
+hostUrl: rpubs.com
+appId: https://api.rpubs.com/api/v1/document/590218/1a09e1733fdd430c824ccc388751ed6d
+bundleId: https://api.rpubs.com/api/v1/document/590218/1a09e1733fdd430c824ccc388751ed6d
+url: http://rpubs.com/okrabarreto/590218
+when: 1585793968.64053
